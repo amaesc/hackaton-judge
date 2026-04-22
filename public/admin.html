@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0d9488" />
+  <title>Admin · Hackathon Judge</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <div class="topbar">
+    <div class="title"><span class="dot"></span> <span id="roleLabel">Admin</span></div>
+    <div class="topbar-right">
+      <span class="user" id="userName"></span>
+      <div id="topControls" class="row"></div>
+      <button class="logout" id="logoutBtn" onclick="logout()"></button>
+    </div>
+  </div>
+
+  <div class="tabs" role="tablist" id="tabBar"></div>
+
+  <div class="container">
+    <div id="alert"></div>
+    <section id="tab-hackathons" class="tab-panel"></section>
+    <section id="tab-live" class="tab-panel hidden"></section>
+    <section id="tab-race" class="tab-panel hidden"></section>
+    <section id="tab-phases" class="tab-panel hidden"></section>
+    <section id="tab-teams" class="tab-panel hidden"></section>
+    <section id="tab-panels" class="tab-panel hidden"></section>
+    <section id="tab-templates" class="tab-panel hidden"></section>
+    <section id="tab-judges" class="tab-panel hidden"></section>
+    <section id="tab-settings" class="tab-panel hidden"></section>
+  </div>
+
+  <script src="/js/i18n.js"></script>
+  <script src="/js/common.js"></script>
+  <script src="/js/admin.js"></script>
+</body>
+</html>

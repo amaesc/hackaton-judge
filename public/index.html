@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0d9488" />
+  <title>Hackathon Judge</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="brand">
+        <div class="logo">HJ</div>
+        <h1 id="appTitle" style="margin-bottom:4px">Hackathon Judge</h1>
+        <p id="loginSubtitle" style="margin:0;font-size:.9rem"></p>
+      </div>
+      <div id="alert"></div>
+      <div class="form-row">
+        <label for="username" id="lblUsername"></label>
+        <input type="text" id="username" autocomplete="username" autocapitalize="off" autocorrect="off" />
+      </div>
+      <div class="form-row">
+        <label for="password" id="lblPassword"></label>
+        <input type="password" id="password" autocomplete="current-password" />
+      </div>
+      <button id="loginBtn" class="btn-block"></button>
+      <div class="login-controls" id="topControls"></div>
+    </div>
+  </div>
+
+  <script src="/js/i18n.js"></script>
+  <script src="/js/common.js"></script>
+  <script>
+    function applyI18n() {
+      document.getElementById('appTitle').textContent = t('app_title');
+      document.getElementById('loginSubtitle').textContent = t('login_subtitle');
+      document.getElementById('lblUsername').textContent = t('username');
+      document.getElementById('lblPassword').textContent = t('password');
+      document.getElementById('loginBtn').textContent = t('sign_in');
+    }
+    applyI18n();
+    window.addEventListener('hj-lang-change', applyI18n);
+
+    renderTopControls();
+
+    const alertBox = document.getElementById('alert');
+    const btn = document.getElementById('loginBtn');
+    const u = document.getElementById('username');
+    const p = document.getElementById('password');
+
+    async function doLogin() {
+      btn.disabled = true; alertBox.innerHTML = '';
+      try {
+        const user = await api('/api/auth/login', {
+          method: 'POST',
+          body: { username: u.value.trim(), password: p.value },
+        });
+        if (user.role === 'admin') location.href = '/admin';
+        else location.href = '/judge';
+      } catch (e) {
+        showAlert(alertBox, e.message === 'Invalid credentials' ? t('invalid_credentials') : e.message);
+        btn.disabled = false;
+      }
+    }
+
+    btn.addEventListener('click', doLogin);
+    p.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+    u.addEventListener('keydown', (e) => { if (e.key === 'Enter') p.focus(); });
+
+    // Auto-redirect
+    (async () => {
+      try {
+        const me = await api('/api/auth/me');
+        if (me.role === 'admin') location.href = '/admin';
+        else if (me.role === 'judge') location.href = '/judge';
+      } catch {}
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0d9488" />
+  <title>Judge · Hackathon Judge</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <div class="topbar">
+    <div class="title"><span class="dot"></span> <span id="roleLabel"></span></div>
+    <div class="topbar-right">
+      <span class="user" id="userName"></span>
+      <div id="topControls" class="row"></div>
+      <button class="logout" id="logoutBtn" onclick="logout()"></button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div id="alert"></div>
+    <div id="content"></div>
+  </div>
+
+  <script src="/js/i18n.js"></script>
+  <script src="/js/common.js"></script>
+  <script>
+    // =============== STATE ===============
+    // View modes: 'picker' | 'admin-controlled' | 'self-paced-list' | 'self-paced-score'
+    let viewMode = 'picker';
+
+    // Common
+    let myHackathons = [];
+    let selectedHackathonId = null;
+    let pollTimer = null;
+
+    // Admin-controlled mode
+    let currentState = null;   // { signature, data }
+
+    // Self-paced mode
+    let selfPacedPhaseId = null;
+    let selfPacedData = null;   // { phase, template, teams: [{team, scored}] }
+    let selfPacedScoringTeam = null;   // { team, phase, template, existing }
+
+    // Scoring form state (used by both modes)
+    let scoreState = {};
+
+    // =============== CHROME ===============
+    function applyChrome() {
+      document.getElementById('roleLabel').textContent = 'Judge';
+      document.getElementById('logoutBtn').textContent = t('sign_out');
+      rerender();
+    }
+
+    function rerender() {
+      if (viewMode === 'picker') renderHackathonPicker();
+      else if (viewMode === 'admin-controlled' && currentState?.data) render(currentState.data);
+      else if (viewMode === 'self-paced-list' && selfPacedData) renderSelfPacedList();
+      else if (viewMode === 'self-paced-score' && selfPacedScoringTeam) renderScoringForm(selfPacedScoringTeam, true);
+    }
+
+    // =============== BOOT ===============
+    (async function boot() {
+      try {
+        const me = await api('/api/auth/me');
+        document.getElementById('userName').textContent = me.name;
+        if (me.role !== 'judge') { location.href = '/admin'; return; }
+      } catch { return; }
+
+      renderTopControls();
+      applyChrome();
+      window.addEventListener('hj-lang-change', applyChrome);
+
+      try { myHackathons = await api('/api/judge/hackathons'); }
+      catch { myHackathons = []; }
+
+      if (myHackathons.length === 0) return renderNoHackathons();
+      if (myHackathons.length === 1) {
+        selectedHackathonId = myHackathons[0].id;
+        return startPolling();
+      }
+      renderHackathonPicker();
+    })();
+
+    function renderNoHackathons() {
+      document.getElementById('content').innerHTML = `
+        <div class="card">
+          <h2>${t('waiting_evaluation')}</h2>
+          <p>${t('waiting_desc')}</p>
+        </div>`;
+    }
+
+    function renderHackathonPicker() {
+      viewMode = 'picker';
+      const content = document.getElementById('content');
+      content.innerHTML = `
+        <div class="card">
+          <h2>${t('pick_a_hackathon')}</h2>
+          <p class="text-sm">${t('pick_hackathon_subtitle')}</p>
+          <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+            ${myHackathons.map(h => `
+              <button class="btn-block btn-secondary" data-pick-hack="${h.id}" style="text-align:left;padding:14px">
+                <div style="font-weight:700;font-size:1rem">${escapeHtml(h.name)}</div>
+                ${h.description ? `<div class="text-xs text-muted" style="margin-top:4px">${escapeHtml(h.description)}</div>` : ''}
+              </button>
+            `).join('')}
+          </div>
+        </div>`;
+      content.querySelectorAll('[data-pick-hack]').forEach(b => {
+        b.addEventListener('click', () => {
+          selectedHackathonId = Number(b.dataset.pickHack);
+          startPolling();
+        });
+      });
+    }
+
+    // =============== POLLING ===============
+    function startPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      currentState = null;
+      selfPacedData = null;
+      selfPacedScoringTeam = null;
+      selfPacedPhaseId = null;
+      refresh();
+      pollTimer = setInterval(refresh, 3000);
+    }
+
+    async function refresh() {
+      if (!selectedHackathonId) return;
+      // If actively scoring a self-paced team, don't clobber the form
+      if (viewMode === 'self-paced-score') return;
+
+      try {
+        const data = await api(`/api/judge/current?hackathonId=${selectedHackathonId}`);
+
+        if (data.selfPaced) {
+          // Phase is self-paced — fetch the team list instead
+          const pid = data.phaseId;
+          if (selfPacedPhaseId !== pid) {
+            selfPacedPhaseId = pid;
+            currentState = null;
+          }
+          const list = await api(`/api/judge/phase-teams?hackathonId=${selectedHackathonId}&phaseId=${pid}`);
+          // signature: how many teams and how many are scored
+          const sig = `sp|${pid}|${list.teams.length}|${list.teams.filter(x => x.scored).length}`;
+          if (!selfPacedData || selfPacedData.signature !== sig) {
+            selfPacedData = { signature: sig, ...list };
+            viewMode = 'self-paced-list';
+            renderSelfPacedList();
+          }
+          return;
+        }
+
+        // Admin-controlled path
+        selfPacedPhaseId = null;
+        selfPacedData = null;
+        const sig = data.active
+          ? `${data.team.id}|${data.phase.id}|${data.template.id}|${data.existing ? 'saved' : 'new'}`
+          : `inactive|${data.reason || ''}`;
+        if (!currentState || currentState.signature !== sig) {
+          currentState = { signature: sig, data };
+          viewMode = 'admin-controlled';
+          render(data);
+        }
+      } catch (e) { console.error(e); }
+    }
+
+    // =============== SELF-PACED LIST ===============
+    function renderSelfPacedList() {
+      viewMode = 'self-paced-list';
+      const content = document.getElementById('content');
+      const switchBtn = myHackathons.length > 1
+        ? `<div style="text-align:right;margin-bottom:10px">
+             <button class="btn-sm btn-secondary" id="switchHackBtn">${t('switch_hackathon')}</button>
+           </div>` : '';
+
+      const { phase, teams } = selfPacedData;
+      const currentHack = myHackathons.find(h => h.id === selectedHackathonId);
+      const allScored = teams.length > 0 && teams.every(t => t.scored);
+
+      if (teams.length === 0) {
+        content.innerHTML = `
+          ${switchBtn}
+          <div class="card">
+            <h2>${escapeHtml(phase.name)}</h2>
+            <div class="text-xs text-muted">${currentHack ? escapeHtml(currentHack.name) : ''}</div>
+            <div class="empty" style="margin-top:12px">${t('no_teams_assigned')}</div>
+          </div>`;
+        wireSwitch();
+        return;
+      }
+
+      content.innerHTML = `
+        ${switchBtn}
+        <div class="card">
+          <div class="row-between mb-1">
+            <h2 style="margin:0">${t('your_teams')}</h2>
+            <span class="badge">${escapeHtml(phase.name)}</span>
+          </div>
+          <div class="text-xs text-muted">${currentHack ? escapeHtml(currentHack.name) : ''}</div>
+          <p class="text-sm" style="margin-top:8px">${t('your_teams_desc')}</p>
+          ${allScored ? `<div class="alert alert-success" style="margin-top:10px">${t('all_scored')}</div>` : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+          ${teams.map(({ team, scored }) => `
+            <button class="btn-block btn-secondary" data-score-team="${team.id}" style="text-align:left;padding:14px;display:flex;align-items:center;gap:12px">
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:700;font-size:1rem">${escapeHtml(team.name)}</div>
+                ${team.description ? `<div class="text-xs text-muted" style="margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(team.description)}</div>` : ''}
+              </div>
+              <span class="badge ${scored ? 'badge-success' : ''}" style="flex-shrink:0">
+                ${scored ? `✓ ${t('scored_badge')}` : t('unscored_badge')}
+              </span>
+            </button>
+          `).join('')}
+        </div>
+      `;
+
+      wireSwitch();
+      content.querySelectorAll('[data-score-team]').forEach(b => {
+        b.addEventListener('click', () => openScoringFor(Number(b.dataset.scoreTeam)));
+      });
+    }
+
+    async function openScoringFor(teamId) {
+      try {
+        const data = await api(
+          `/api/judge/team-eval?hackathonId=${selectedHackathonId}&phaseId=${selfPacedPhaseId}&teamId=${teamId}`
+        );
+        selfPacedScoringTeam = data;
+        viewMode = 'self-paced-score';
+        renderScoringForm(data, true);
+      } catch (e) {
+        showAlert(document.getElementById('alert'), e.message);
+      }
+    }
+
+    function backToList() {
+      selfPacedScoringTeam = null;
+      viewMode = 'self-paced-list';
+      renderSelfPacedList();
+      refresh(); // refresh the list to reflect any new scores
+    }
+
+    function wireSwitch() {
+      const b = document.getElementById('switchHackBtn');
+      if (b) b.addEventListener('click', () => {
+        if (pollTimer) clearInterval(pollTimer);
+        selectedHackathonId = null;
+        renderHackathonPicker();
+      });
+    }
+
+    // =============== ADMIN-CONTROLLED RENDER (data.active === true) ===============
+    function render(data) {
+      viewMode = 'admin-controlled';
+      const content = document.getElementById('content');
+      const switchBtn = myHackathons.length > 1
+        ? `<div style="text-align:right;margin-bottom:10px">
+             <button class="btn-sm btn-secondary" id="switchHackBtn">${t('switch_hackathon')}</button>
+           </div>` : '';
+
+      if (!data.active) {
+        content.innerHTML = `
+          ${switchBtn}
+          <div class="card">
+            <h2>${t('waiting_evaluation')}</h2>
+            <p>${t('waiting_desc')}</p>
+            <div class="live-pill"><span class="pulse"></span> ${t('listening')}</div>
+          </div>`;
+        wireSwitch();
+        return;
+      }
+
+      // Active team — delegate to the common scoring form renderer
+      renderScoringForm(data, false);
+    }
+
+    // =============== SCORING FORM (shared by admin-controlled + self-paced) ===============
+    // params: data = {team, phase, template, existing}, selfPaced = boolean
+    function renderScoringForm(data, selfPaced) {
+      const { team, template, phase, existing } = data;
+      const content = document.getElementById('content');
+
+      scoreState = {};
+      if (existing) {
+        for (const s of existing.scores) {
+          scoreState[s.criterion_id] = { levelId: s.level_id, value: s.value, note: s.note || '' };
+        }
+      }
+
+      const savedBadge = existing ? `<span class="badge badge-success">${t('submitted')}</span>` : '';
+      const currentHack = myHackathons.find(h => h.id === selectedHackathonId);
+      const topBar = selfPaced
+        ? `<div style="margin-bottom:10px">
+             <button class="btn-sm btn-secondary" id="backToListBtn">&larr; ${t('back_to_list')}</button>
+           </div>`
+        : (myHackathons.length > 1
+            ? `<div style="text-align:right;margin-bottom:10px">
+                 <button class="btn-sm btn-secondary" id="switchHackBtn">${t('switch_hackathon')}</button>
+               </div>` : '');
+
+      content.innerHTML = `
+        ${topBar}
+        <div class="card">
+          <div class="row-between mb-1">
+            <h2 style="margin:0">${escapeHtml(team.name)}</h2>
+            ${savedBadge}
+          </div>
+          ${team.description ? `<p class="text-sm">${escapeHtml(team.description)}</p>` : ''}
+          <div class="text-xs text-muted">
+            ${currentHack ? `<strong>${escapeHtml(currentHack.name)}</strong> · ` : ''}
+            <strong>${escapeHtml(phase.name)}</strong> · ${escapeHtml(template.name)}
+            · ${t('template_total', { n: template.totalMaxPoints })}
+          </div>
+          <div class="text-xs text-muted mt-1">${t('score_each_criterion')}</div>
+        </div>
+        <div id="criteriaForm"></div>
+        <button id="submitBtn" class="btn-block" style="margin-top:12px">
+          ${existing ? t('update_scores') : t('submit_scores')}
+        </button>
+      `;
+
+      renderCriteria(template);
+      document.getElementById('submitBtn').addEventListener('click', () => submit(selfPaced));
+      if (selfPaced) document.getElementById('backToListBtn').addEventListener('click', backToList);
+      else wireSwitch();
+    }
+
+    function renderCriteria(template) {
+      const host = document.getElementById('criteriaForm');
+      const chunks = [];
+      for (const sec of template.sections) {
+        if (sec.name) chunks.push(`<div class="criterion-section-title">${escapeHtml(sec.name)}</div>`);
+        for (const c of sec.criteria) chunks.push(renderCriterionCard(c));
+      }
+      host.innerHTML = chunks.join('');
+      wireCriteria(template);
+    }
+
+    function renderCriterionCard(c) {
+      const existing = scoreState[c.id];
+      const selectedLevelId = existing?.levelId ?? null;
+      const selectedValue = existing?.value ?? null;
+      const note = existing?.note || '';
+      const hasRubric = (c.levels && c.levels.length > 0);
+
+      let levelsHtml = '';
+      if (hasRubric) {
+        levelsHtml = `
+          <div class="score-section">
+            <div class="score-section-label">${t('select_level')}</div>
+            <div class="level-grid">
+              ${c.levels.map((lv) => `
+                <div class="level-card" data-crit="${c.id}" data-level="${lv.id}"
+                     aria-pressed="${selectedLevelId === lv.id ? 'true' : 'false'}">
+                  <div class="level-head">
+                    <div class="level-name">${escapeHtml(lv.label)}</div>
+                    <div class="level-range">${lv.min_points}–${lv.max_points} pts</div>
+                  </div>
+                  ${lv.description ? `<div class="level-desc">${escapeHtml(lv.description)}</div>` : ''}
+                </div>
+              `).join('')}
+            </div>
+          </div>`;
+      }
+
+      let pickerHtml = '';
+      if (hasRubric && selectedLevelId) {
+        const lv = c.levels.find((l) => l.id === selectedLevelId);
+        pickerHtml = `
+          <div class="score-section" data-score-picker="${c.id}">
+            <div class="score-section-label">${t('pick_exact_score')} (${t('points_range', { min: lv.min_points, max: lv.max_points })})</div>
+            <div class="score-buttons">
+              ${Array.from({ length: lv.max_points - lv.min_points + 1 }, (_, i) => lv.min_points + i)
+                .map(v => `<button class="score-btn" data-crit="${c.id}" data-val="${v}" aria-pressed="${selectedValue === v ? 'true' : 'false'}">${v}</button>`)
+                .join('')}
+            </div>
+          </div>`;
+      } else if (!hasRubric) {
+        pickerHtml = `
+          <div class="score-section">
+            <div class="score-section-label">${t('pick_exact_score')} (0–${c.max_points})</div>
+            <div class="score-buttons">
+              ${Array.from({ length: c.max_points + 1 }, (_, i) => i)
+                .map(v => `<button class="score-btn" data-crit="${c.id}" data-val="${v}" aria-pressed="${selectedValue === v ? 'true' : 'false'}">${v}</button>`)
+                .join('')}
+            </div>
+          </div>`;
+      }
+
+      const noteUI = `
+        <button class="note-toggle" data-note-toggle="${c.id}" type="button">
+          ${note ? t('edit_note') : t('add_note')}
+        </button>
+        <textarea class="note-field ${note ? '' : 'hidden'}" data-note="${c.id}"
+          placeholder="${t('note_placeholder')}" style="margin-top:6px">${escapeHtml(note)}</textarea>
+      `;
+
+      return `
+        <div class="criterion-card" data-card="${c.id}">
+          <div class="label-row">
+            <div class="crit-name">${escapeHtml(c.label)}</div>
+            <div class="w">0–${c.max_points} pts</div>
+          </div>
+          ${c.description ? `<div class="desc">${escapeHtml(c.description)}</div>` : ''}
+          ${levelsHtml}
+          ${pickerHtml}
+          ${noteUI}
+        </div>
+      `;
+    }
+
+    function wireCriteria(template) {
+      const host = document.getElementById('criteriaForm');
+      host.querySelectorAll('.level-card').forEach((card) => {
+        card.addEventListener('click', () => {
+          const cid = Number(card.dataset.crit);
+          const lid = Number(card.dataset.level);
+          const crit = template.criteria.find((c) => c.id === cid);
+          const lv = crit.levels.find((l) => l.id === lid);
+          const prev = scoreState[cid];
+          let value = prev?.value;
+          if (value === undefined || value === null || value < lv.min_points || value > lv.max_points) value = null;
+          scoreState[cid] = { levelId: lid, value, note: prev?.note || '' };
+          updateCriterionCard(template, cid);
+        });
+      });
+      host.querySelectorAll('.score-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const cid = Number(btn.dataset.crit);
+          const v = Number(btn.dataset.val);
+          const prev = scoreState[cid] || {};
+          scoreState[cid] = { ...prev, value: v };
+          host.querySelectorAll(`.score-btn[data-crit="${cid}"]`)
+            .forEach((b) => b.setAttribute('aria-pressed', Number(b.dataset.val) === v ? 'true' : 'false'));
+        });
+      });
+      host.querySelectorAll('[data-note-toggle]').forEach((tog) => {
+        tog.addEventListener('click', () => {
+          const cid = tog.dataset.noteToggle;
+          const field = host.querySelector(`[data-note="${cid}"]`);
+          field.classList.toggle('hidden');
+          if (!field.classList.contains('hidden')) field.focus();
+        });
+      });
+      host.querySelectorAll('[data-note]').forEach((f) => {
+        f.addEventListener('input', () => {
+          const cid = Number(f.dataset.note);
+          const prev = scoreState[cid] || {};
+          scoreState[cid] = { ...prev, note: f.value };
+        });
+      });
+    }
+
+    function updateCriterionCard(template, cid) {
+      const card = document.querySelector(`[data-card="${cid}"]`);
+      if (!card) return;
+      const c = template.criteria.find((x) => x.id === cid);
+      card.outerHTML = renderCriterionCard(c);
+      wireCriteria(template);
+    }
+
+    async function submit(selfPaced) {
+      const alertBox = document.getElementById('alert');
+      alertBox.innerHTML = '';
+      const data = selfPaced ? selfPacedScoringTeam : currentState.data;
+      const { template } = data;
+      const scores = [];
+      for (const c of template.criteria) {
+        const s = scoreState[c.id];
+        if (!s || s.value === undefined || s.value === null) {
+          showAlert(alertBox, t('please_score_all', { label: c.label }));
+          return;
+        }
+        scores.push({ criterionId: c.id, levelId: s.levelId || null, value: s.value, note: s.note || null });
+      }
+      const btn = document.getElementById('submitBtn');
+      btn.disabled = true;
+      try {
+        const body = { hackathonId: selectedHackathonId, scores };
+        if (selfPaced) {
+          body.teamId = data.team.id;
+          body.phaseId = data.phase.id;
+        }
+        await api('/api/judge/submit', { method: 'POST', body });
+        showAlert(alertBox, t('scores_submitted'), 'success');
+
+        if (selfPaced) {
+          // Return to the list after a brief success flash
+          setTimeout(() => { backToList(); }, 600);
+        } else {
+          currentState = null;
+          await refresh();
+        }
+      } catch (e) {
+        showAlert(alertBox, e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
